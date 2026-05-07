@@ -1,11 +1,12 @@
 /**
- * Deploy {{projectName}} contract to a local Midnight devnet.
+ * Deploy {{projectName}} contract to a Midnight network (undeployed by default; use --network preview|preprod for public networks).
  *
  * Non-interactive: scaffold → npm run setup runs straight through.
  * No readline prompts, no .midnight-seed file.
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { resolveNetwork, getOrCreateSeed, recordDeployment } from './network';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { WebSocket } from 'ws';
 import * as Rx from 'rxjs';
@@ -24,8 +25,7 @@ import { WalletFacade } from '@midnight-ntwrk/wallet-sdk-facade';
 import { DustWallet } from '@midnight-ntwrk/wallet-sdk-dust-wallet';
 import { HDWallet, Roles } from '@midnight-ntwrk/wallet-sdk-hd';
 import { ShieldedWallet } from '@midnight-ntwrk/wallet-sdk-shielded';
-import { createKeystore, PublicKey, UnshieldedWallet } from '@midnight-ntwrk/wallet-sdk-unshielded-wallet';
-import { NoOpTransactionHistoryStorage } from '@midnight-ntwrk/wallet-sdk-abstractions';
+import { createKeystore, NoOpTransactionHistoryStorage, PublicKey, UnshieldedWallet } from '@midnight-ntwrk/wallet-sdk-unshielded-wallet';
 import { CompiledContract } from '@midnight-ntwrk/compact-js';
 
 // @ts-expect-error Required for wallet sync
@@ -33,28 +33,12 @@ globalThis.WebSocket = WebSocket;
 
 // ─── Network configuration ─────────────────────────────────────────────────────
 //
-// Single source of truth for everything the wallet and providers need to point at.
-// To add another deploy target later (e.g. Preprod), define a sibling object with
-// the same shape and select between them. Don't add the selector until it's needed.
+// Resolved from --network flag, .midnight-state.json, or defaulting to
+// 'undeployed' (local devnet). Switch networks with: npm run network <name>
 
-const localDevnet = {
-  networkId: 'undeployed' as const,
-  indexer: 'http://127.0.0.1:8088/api/v3/graphql',
-  indexerWS: 'ws://127.0.0.1:8088/api/v3/graphql/ws',
-  node: 'ws://127.0.0.1:9944',
-  proofServer: 'http://127.0.0.1:6300',
-};
-
-setNetworkId(localDevnet.networkId);
-
-// ─── Genesis seed ──────────────────────────────────────────────────────────────
-//
-// LOCAL DEVNET ONLY.
-// The local devnet's `dev` preset pre-mints NIGHT to the wallet derived from
-// this well-known seed. Anyone running this devnet has full access to the funds
-// at this seed — never reuse it on Preprod, mainnet, or any environment that
-// handles real value.
-const GENESIS_SEED = '0000000000000000000000000000000000000000000000000000000000000001';
+const { network, config: networkConfig } = resolveNetwork();
+setNetworkId(networkConfig.networkId);
+const SEED = getOrCreateSeed(network);
 
 // ─── Proof server readiness ────────────────────────────────────────────────────
 //
@@ -65,7 +49,7 @@ const GENESIS_SEED = '0000000000000000000000000000000000000000000000000000000000
 async function waitForProofServer(maxAttempts = 60, delayMs = 2000): Promise<boolean> {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      await fetch(localDevnet.proofServer, {
+      await fetch(networkConfig.proofServer, {
         method: 'GET',
         signal: AbortSignal.timeout(3000),
       });
@@ -125,9 +109,9 @@ async function createWallet(seed: string) {
 
   const walletConfig = {
     networkId,
-    indexerClientConnection: { indexerHttpUrl: localDevnet.indexer, indexerWsUrl: localDevnet.indexerWS },
-    provingServerUrl: new URL(localDevnet.proofServer),
-    relayURL: new URL(localDevnet.node.replace(/^http/, 'ws')),
+    indexerClientConnection: { indexerHttpUrl: networkConfig.indexer, indexerWsUrl: networkConfig.indexerWS },
+    provingServerUrl: new URL(networkConfig.proofServer),
+    relayURL: new URL(networkConfig.node.replace(/^http/, 'ws')),
     txHistoryStorage: new NoOpTransactionHistoryStorage(),
     costParameters: { additionalFeeOverhead: 300_000_000_000_000n, feeBlocksMargin: 5 },
   };
@@ -179,9 +163,9 @@ async function createProviders(walletCtx: ReturnType<typeof createWallet> extend
       accountId,
       privateStoragePasswordProvider: () => privateStatePassword,
     }),
-    publicDataProvider: indexerPublicDataProvider(localDevnet.indexer, localDevnet.indexerWS),
+    publicDataProvider: indexerPublicDataProvider(networkConfig.indexer, networkConfig.indexerWS),
     zkConfigProvider,
-    proofProvider: httpClientProofProvider(localDevnet.proofServer, zkConfigProvider),
+    proofProvider: httpClientProofProvider(networkConfig.proofServer, zkConfigProvider),
     walletProvider,
     midnightProvider: walletProvider,
   };
@@ -191,10 +175,10 @@ async function createProviders(walletCtx: ReturnType<typeof createWallet> extend
 
 async function main() {
   console.log('\n╔══════════════════════════════════════════════════════════════╗');
-  console.log('║           Deploy {{projectName}} to local devnet              ║');
+  console.log(`║  Deploy {{projectName}} to ${network}`);
   console.log('╚══════════════════════════════════════════════════════════════╝\n');
 
-  const seed = GENESIS_SEED;
+  const seed = SEED;
 
   console.log('─── Wallet setup ───────────────────────────────────────────────\n');
   console.log('  Creating wallet...');
@@ -217,13 +201,55 @@ async function main() {
   console.log(`\n  Wallet Address: ${address}`);
   console.log(`  Balance: ${balance.toLocaleString()} tNight\n`);
 
-  if (balance === 0n) {
+  if (network === 'undeployed' && balance === 0n) {
     console.error(
       '\n❌ Genesis-seed wallet has zero NIGHT. The devnet preset may not have minted to it.\n' +
         '   Check `docker compose ps` and `docker compose logs node`. Then `docker compose down -v` and retry.\n',
     );
     await walletCtx.wallet.stop();
     process.exit(1);
+  }
+
+  // Faucet poll for public networks. The wallet has 0 tNIGHT until the user
+  // funds the address from the network's faucet. The display balance is
+  // authoritative here (unlike DUST, tNIGHT shows up immediately once the
+  // faucet tx lands).
+  if (network !== 'undeployed' && networkConfig.faucet) {
+    // Same balance idiom used by check-balance.ts:
+    //   state.unshielded.balances[unshieldedToken().raw] ?? 0n
+    const initialBalance = await Rx.firstValueFrom(walletCtx.wallet.state().pipe(
+      Rx.filter((s) => s.isSynced),
+    ));
+    const initialTNight = initialBalance.unshielded.balances[unshieldedToken().raw] ?? 0n;
+    if (initialTNight === 0n) {
+      console.log('─── Fund Wallet ────────────────────────────────────────────────\n');
+      console.log(`  Wallet address: ${address}`);
+      console.log(`  Faucet:         ${networkConfig.faucet}`);
+      console.log('');
+      console.log('  Waiting for tNIGHT to arrive (poll every 10s)...');
+      const rawTimeout = Number(process.env.MIDNIGHT_FAUCET_TIMEOUT_MS);
+      const timeoutMs = Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : 600_000;
+      const start = Date.now();
+      while (true) {
+        await new Promise((r) => setTimeout(r, 10_000));
+        const s = await Rx.firstValueFrom(walletCtx.wallet.state().pipe(Rx.filter((x) => x.isSynced)));
+        const tn = s.unshielded.balances[unshieldedToken().raw] ?? 0n;
+        if (tn > 0n) {
+          console.log(`\n  Funded! tNIGHT balance: ${tn.toLocaleString()}\n`);
+          break;
+        }
+        if (Date.now() - start > timeoutMs) {
+          console.log(`\n  ❌ Funding not received within ${Math.round(timeoutMs / 60_000)} min.`);
+          console.log(`  Address: ${address}`);
+          console.log(`  Faucet:  ${networkConfig.faucet}`);
+          console.log('  Re-run setup after funding — your seed is preserved.\n');
+          await walletCtx.wallet.stop();
+          process.exit(1);
+        }
+        const elapsed = Math.round((Date.now() - start) / 1000);
+        process.stdout.write(`\r  ...still waiting (${elapsed}s elapsed)`);
+      }
+    }
   }
 
   // Register for DUST.
@@ -235,15 +261,17 @@ async function main() {
   );
   if (unregisteredUtxos.length > 0) {
     console.log(`  Registering ${unregisteredUtxos.length} NIGHT UTXOs for DUST generation...`);
+    // The signDustRegistration callback (3rd arg) already produces a recipe
+    // with N signatures matching N inputs. Do NOT call signRecipe again — that
+    // would double-sign and the chain rejects with InputsSignaturesLengthMismatch
+    // (Custom error 192). Matches upstream example-counter and example-bboard.
     const recipe = await walletCtx.wallet.registerNightUtxosForDustGeneration(
       unregisteredUtxos,
       walletCtx.unshieldedKeystore.getPublicKey(),
       (payload) => walletCtx.unshieldedKeystore.signData(payload),
     );
-    const signedRecipe = await walletCtx.wallet.signRecipe(recipe, (payload) =>
-      walletCtx.unshieldedKeystore.signData(payload),
-    );
-    await walletCtx.wallet.submitTransaction(await walletCtx.wallet.finalizeRecipe(signedRecipe));
+    const finalized = await walletCtx.wallet.finalizeRecipe(recipe);
+    await walletCtx.wallet.submitTransaction(finalized);
   }
 
   if (dustState.dust.balance(new Date()) === 0n) {
@@ -267,7 +295,7 @@ async function main() {
     console.log('\n  ❌ Proof server not responding. Run: docker compose up -d\n');
     fs.writeFileSync(
       'deployment.json',
-      JSON.stringify({ address, network: localDevnet.networkId, status: 'proof_server_unavailable' }, null, 2),
+      JSON.stringify({ address, network: networkConfig.networkId, status: 'proof_server_unavailable' }, null, 2),
     );
     await walletCtx.wallet.stop();
     process.exit(1);
@@ -335,7 +363,7 @@ async function main() {
         console.log('  ❌ Proof server unreachable. Run: docker compose up -d\n');
         fs.writeFileSync(
           'deployment.json',
-          JSON.stringify({ address, network: localDevnet.networkId, status: 'proof_server_error' }, null, 2),
+          JSON.stringify({ address, network: networkConfig.networkId, status: 'proof_server_error' }, null, 2),
         );
         await walletCtx.wallet.stop();
         process.exit(1);
@@ -356,7 +384,7 @@ async function main() {
           fs.writeFileSync(
             'deployment.json',
             JSON.stringify(
-              { address, network: localDevnet.networkId, status: 'pending_dust', lastAttempt: new Date().toISOString() },
+              { address, network: networkConfig.networkId, status: 'pending_dust', lastAttempt: new Date().toISOString() },
               null,
               2,
             ),
@@ -376,15 +404,8 @@ async function main() {
   console.log('  ✅ Contract deployed successfully!\n');
   console.log(`  Contract Address: ${contractAddress}\n`);
 
-  fs.writeFileSync(
-    'deployment.json',
-    JSON.stringify(
-      { contractAddress, network: localDevnet.networkId, deployedAt: new Date().toISOString() },
-      null,
-      2,
-    ),
-  );
-  console.log('  Saved to deployment.json\n');
+  recordDeployment(network, contractAddress, address.toString());
+  console.log('  Saved to .midnight-state.json\n');
 
   await walletCtx.wallet.stop();
   console.log('─── Deployment complete ────────────────────────────────────────\n');

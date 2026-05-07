@@ -13,37 +13,18 @@ import { WalletFacade } from '@midnight-ntwrk/wallet-sdk-facade';
 import { DustWallet } from '@midnight-ntwrk/wallet-sdk-dust-wallet';
 import { HDWallet, Roles } from '@midnight-ntwrk/wallet-sdk-hd';
 import { ShieldedWallet } from '@midnight-ntwrk/wallet-sdk-shielded';
-import { createKeystore, PublicKey, UnshieldedWallet } from '@midnight-ntwrk/wallet-sdk-unshielded-wallet';
-import { NoOpTransactionHistoryStorage } from '@midnight-ntwrk/wallet-sdk-abstractions';
+import { createKeystore, NoOpTransactionHistoryStorage, PublicKey, UnshieldedWallet } from '@midnight-ntwrk/wallet-sdk-unshielded-wallet';
+import { resolveNetwork, getOrCreateSeed } from './network';
 
 // Enable WebSocket for GraphQL subscriptions
 // @ts-expect-error Required for wallet sync
 globalThis.WebSocket = WebSocket;
 
 // ─── Network configuration ─────────────────────────────────────────────────────
-//
-// Single source of truth for everything the wallet and providers need to point at.
-// To add another deploy target later (e.g. Preprod), define a sibling object with
-// the same shape and select between them. Don't add the selector until it's needed.
 
-const localDevnet = {
-  networkId: 'undeployed' as const,
-  indexer: 'http://127.0.0.1:8088/api/v3/graphql',
-  indexerWS: 'ws://127.0.0.1:8088/api/v3/graphql/ws',
-  node: 'ws://127.0.0.1:9944',
-  proofServer: 'http://127.0.0.1:6300',
-};
-
-setNetworkId(localDevnet.networkId);
-
-// ─── Genesis seed ──────────────────────────────────────────────────────────────
-//
-// LOCAL DEVNET ONLY.
-// The local devnet's `dev` preset pre-mints NIGHT to the wallet derived from
-// this well-known seed. Anyone running this devnet has full access to the funds
-// at this seed — never reuse it on Preprod, mainnet, or any environment that
-// handles real value.
-const GENESIS_SEED = '0000000000000000000000000000000000000000000000000000000000000001';
+const { network, config: networkConfig } = resolveNetwork();
+setNetworkId(networkConfig.networkId);
+const SEED = getOrCreateSeed(network);
 
 // ─── Wallet Functions ──────────────────────────────────────────────────────────
 
@@ -65,9 +46,9 @@ async function createWallet(seed: string) {
 
   const walletConfig = {
     networkId,
-    indexerClientConnection: { indexerHttpUrl: localDevnet.indexer, indexerWsUrl: localDevnet.indexerWS },
-    provingServerUrl: new URL(localDevnet.proofServer),
-    relayURL: new URL(localDevnet.node.replace(/^http/, 'ws')),
+    indexerClientConnection: { indexerHttpUrl: networkConfig.indexer, indexerWsUrl: networkConfig.indexerWS },
+    provingServerUrl: new URL(networkConfig.proofServer),
+    relayURL: new URL(networkConfig.node.replace(/^http/, 'ws')),
     txHistoryStorage: new NoOpTransactionHistoryStorage(),
     costParameters: { additionalFeeOverhead: 300_000_000_000_000n, feeBlocksMargin: 5 },
   };
@@ -91,7 +72,7 @@ async function main() {
   console.log('║                   Wallet Balance Checker                      ║');
   console.log('╚══════════════════════════════════════════════════════════════╝\n');
 
-  const seed = GENESIS_SEED;
+  const seed = SEED;
 
   try {
     console.log('  Building wallet...');
@@ -115,16 +96,23 @@ async function main() {
 
     console.log('\n─── Wallet Details ─────────────────────────────────────────────\n');
     console.log(`  Address: ${address}`);
-    console.log(`  Network: ${localDevnet.networkId}\n`);
+    console.log(`  Network: ${networkConfig.networkId}\n`);
 
     console.log('─── Balances ───────────────────────────────────────────────────\n');
     console.log(`  tNight: ${tNightBalance.toLocaleString()}`);
     console.log(`  DUST:   ${dustBalance.toLocaleString()}\n`);
 
     if (tNightBalance === 0n) {
-      console.log('  ⚠ Wallet has no tNight. Make sure the local devnet is running');
-      console.log('     with the `dev` preset (npm run devnet:start) — the genesis');
-      console.log('     seed is pre-funded by the dev preset.\n');
+      if (network === 'undeployed') {
+        console.log('  ⚠ Wallet has no tNight. Make sure the local devnet is running');
+        console.log('     (npm run setup) — the genesis seed is pre-funded by the dev preset.\n');
+      } else if (networkConfig.faucet) {
+        console.log(`  ⚠ Wallet has no tNight. Fund it from the faucet:`);
+        console.log(`     ${networkConfig.faucet}`);
+        console.log(`     Wallet address: ${address}\n`);
+      } else {
+        console.log('  ⚠ Wallet has no tNight.\n');
+      }
     } else {
       console.log('  ✅ Wallet is funded and ready!\n');
     }

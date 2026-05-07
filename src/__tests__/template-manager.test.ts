@@ -35,6 +35,8 @@ describe("TemplateManager", () => {
     ).toBe(true);
     expect(fs.existsSync(path.join(targetDir, "src", "deploy.ts"))).toBe(true);
     expect(fs.existsSync(path.join(targetDir, "src", "cli.ts"))).toBe(true);
+    expect(fs.existsSync(path.join(targetDir, "src", "network.ts"))).toBe(true);
+    expect(fs.existsSync(path.join(targetDir, "src", "setup.ts"))).toBe(true);
     expect(fs.existsSync(path.join(targetDir, "scripts", "e2e-check.ts"))).toBe(
       true,
     );
@@ -49,6 +51,10 @@ describe("TemplateManager", () => {
       fs.readFileSync(path.join(targetDir, "package.json"), "utf-8"),
     );
     expect(pkg.name).toBe("test-project");
+
+    // Check script commands
+    expect(pkg.scripts.network).toBe("npx tsx src/network.ts");
+    expect(pkg.scripts.setup).toBe("npx tsx src/setup.ts");
   });
 
   it("renames _gitignore to .gitignore", async () => {

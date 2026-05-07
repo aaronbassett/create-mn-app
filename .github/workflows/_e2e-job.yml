@@ -16,6 +16,15 @@ on:
         required: false
         type: boolean
         default: true
+      network:
+        description: Network to deploy against (undeployed | preview | preprod)
+        required: false
+        type: string
+        default: undeployed
+    secrets:
+      WALLET_SEED:
+        description: Pre-funded wallet seed for public-network E2E. Required when network != undeployed.
+        required: false
 
 jobs:
   e2e:
@@ -70,17 +79,25 @@ jobs:
 
       - name: npm run setup
         working-directory: test-app
-        run: npm run setup
+        env:
+          MIDNIGHT_WALLET_SEED: ${{ secrets.WALLET_SEED }}
+        run: |
+          if [ "${{ inputs.network }}" = "undeployed" ]; then
+            npm run setup
+          else
+            npm run setup -- --network ${{ inputs.network }}
+          fi
 
       - name: npm run test:e2e
         working-directory: test-app
-        run: npm run test:e2e
-
-      - name: Assert deployment.json
-        working-directory: test-app
+        env:
+          MIDNIGHT_WALLET_SEED: ${{ secrets.WALLET_SEED }}
         run: |
-          jq -e '.contractAddress | type == "string" and length > 0' deployment.json
-          jq -r '.contractAddress, .network' deployment.json
+          if [ "${{ inputs.network }}" = "undeployed" ]; then
+            npm run test:e2e
+          else
+            npm run test:e2e -- --network ${{ inputs.network }}
+          fi
 
       - name: Capture diagnostics on failure
         if: failure()
@@ -97,7 +114,7 @@ jobs:
           path: |
             test-app/docker-ps.txt
             test-app/docker-logs.txt
-            test-app/deployment.json
+            test-app/.midnight-state.json
             test-app/contracts/managed/
           if-no-files-found: ignore
 
