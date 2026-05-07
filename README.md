@@ -17,11 +17,11 @@ npm run setup
 
 The `setup` command:
 
-1. Starts proof server via Docker
+1. Starts a local Midnight devnet (node + indexer + proof-server) via Docker Compose, blocking until healthy
 2. Compiles the Compact contract
-3. Deploys to Preprod (prompts for faucet funding)
+3. Deploys to the local devnet using the dev preset's genesis-seed wallet (NIGHT pre-minted)
 
-> Fund your wallet at [faucet.preprod.midnight.network](https://faucet.preprod.midnight.network/)
+After setup, `npm run test:e2e` confirms the contract is on chain and indexable.
 
 ## Why create-mn-app?
 
@@ -118,14 +118,16 @@ npx create-mn-app@latest my-app --from user/repo  # clone any GitHub repo
 ```
 my-app/
 ├── contracts/
-│   └── hello-world.compact    # Compact smart contract
+│   └── hello-world.compact     # Compact smart contract
+├── scripts/
+│   └── e2e-check.ts            # smoke + read-back e2e test
 ├── src/
-│   ├── cli.ts                 # Interact with deployed contract
-│   ├── deploy.ts              # Deploy contract to Preprod
-│   └── check-balance.ts       # Check wallet balance
-├── docker-compose.yml         # Proof server config
+│   ├── cli.ts                  # Interact with deployed contract
+│   ├── deploy.ts               # Deploy contract to local devnet
+│   └── check-balance.ts        # Check wallet balance
+├── docker-compose.yml          # Local devnet (node + indexer + proof-server)
 ├── package.json
-└── deployment.json            # Generated after deploy (contains wallet seed)
+└── deployment.json             # Generated after deploy (contract address)
 ```
 
 ## Contributing

@@ -22,7 +22,6 @@ contracts/managed/
 deployment.json
 
 # Wallet seed (sensitive)
-.midnight-seed
 
 # OS generated files
 .DS_Store

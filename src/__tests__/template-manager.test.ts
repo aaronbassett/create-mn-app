@@ -35,6 +35,9 @@ describe("TemplateManager", () => {
     ).toBe(true);
     expect(fs.existsSync(path.join(targetDir, "src", "deploy.ts"))).toBe(true);
     expect(fs.existsSync(path.join(targetDir, "src", "cli.ts"))).toBe(true);
+    expect(fs.existsSync(path.join(targetDir, "scripts", "e2e-check.ts"))).toBe(
+      true,
+    );
 
     // Check .template files are NOT present (should be stripped)
     expect(fs.existsSync(path.join(targetDir, "package.json.template"))).toBe(

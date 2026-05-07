@@ -1,0 +1,21 @@
+name: E2E Post-Publish
+
+on:
+  workflow_run:
+    workflows: ['Publish to NPM']
+    types: [completed]
+
+jobs:
+  matrix:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # See note in e2e.yml — macos-latest disabled until Colima works on
+        # GitHub-hosted macOS runners.
+        os: [ubuntu-latest]
+    uses: ./.github/workflows/_e2e-job.yml
+    with:
+      runs-on: ${{ matrix.os }}
+      scaffold-command: 'npx --yes create-mn-app@latest test-app -y -t hello-world --use-npm'
+      build-source: false

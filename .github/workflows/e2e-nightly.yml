@@ -1,0 +1,20 @@
+name: E2E Nightly
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  matrix:
+    strategy:
+      fail-fast: false
+      matrix:
+        # See note in e2e.yml — macos-latest disabled until Colima works on
+        # GitHub-hosted macOS runners.
+        os: [ubuntu-latest]
+    uses: ./.github/workflows/_e2e-job.yml
+    with:
+      runs-on: ${{ matrix.os }}
+      scaffold-command: 'node bin/create-midnight-app.js test-app -y -t hello-world --use-npm'
+      build-source: true

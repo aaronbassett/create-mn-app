@@ -23,23 +23,38 @@ import { WalletFacade } from '@midnight-ntwrk/wallet-sdk-facade';
 import { DustWallet } from '@midnight-ntwrk/wallet-sdk-dust-wallet';
 import { HDWallet, Roles } from '@midnight-ntwrk/wallet-sdk-hd';
 import { ShieldedWallet } from '@midnight-ntwrk/wallet-sdk-shielded';
-import { createKeystore, InMemoryTransactionHistoryStorage, PublicKey, UnshieldedWallet } from '@midnight-ntwrk/wallet-sdk-unshielded-wallet';
+import { createKeystore, PublicKey, UnshieldedWallet } from '@midnight-ntwrk/wallet-sdk-unshielded-wallet';
+import { NoOpTransactionHistoryStorage } from '@midnight-ntwrk/wallet-sdk-abstractions';
 import { CompiledContract } from '@midnight-ntwrk/compact-js';
 
 // Enable WebSocket for GraphQL subscriptions
 // @ts-expect-error Required for wallet sync
 globalThis.WebSocket = WebSocket;
 
-// Set network to preprod
-setNetworkId('preprod');
+// ─── Network configuration ─────────────────────────────────────────────────────
+//
+// Single source of truth for everything the wallet and providers need to point at.
+// To add another deploy target later (e.g. Preprod), define a sibling object with
+// the same shape and select between them. Don't add the selector until it's needed.
 
-// Preprod network configuration
-const CONFIG = {
-  indexer: 'https://indexer.preprod.midnight.network/api/v3/graphql',
-  indexerWS: 'wss://indexer.preprod.midnight.network/api/v3/graphql/ws',
-  node: 'https://rpc.preprod.midnight.network',
+const localDevnet = {
+  networkId: 'undeployed' as const,
+  indexer: 'http://127.0.0.1:8088/api/v3/graphql',
+  indexerWS: 'ws://127.0.0.1:8088/api/v3/graphql/ws',
+  node: 'ws://127.0.0.1:9944',
   proofServer: 'http://127.0.0.1:6300',
 };
+
+setNetworkId(localDevnet.networkId);
+
+// ─── Genesis seed ──────────────────────────────────────────────────────────────
+//
+// LOCAL DEVNET ONLY.
+// The local devnet's `dev` preset pre-mints NIGHT to the wallet derived from
+// this well-known seed. Anyone running this devnet has full access to the funds
+// at this seed — never reuse it on Preprod, mainnet, or any environment that
+// handles real value.
+const GENESIS_SEED = '0000000000000000000000000000000000000000000000000000000000000001';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const zkConfigPath = path.resolve(__dirname, '..', 'contracts', 'managed', 'hello-world');
@@ -80,10 +95,10 @@ async function createWallet(seed: string) {
 
   const walletConfig = {
     networkId,
-    indexerClientConnection: { indexerHttpUrl: CONFIG.indexer, indexerWsUrl: CONFIG.indexerWS },
-    provingServerUrl: new URL(CONFIG.proofServer),
-    relayURL: new URL(CONFIG.node.replace(/^http/, 'ws')),
-    txHistoryStorage: new InMemoryTransactionHistoryStorage(),
+    indexerClientConnection: { indexerHttpUrl: localDevnet.indexer, indexerWsUrl: localDevnet.indexerWS },
+    provingServerUrl: new URL(localDevnet.proofServer),
+    relayURL: new URL(localDevnet.node.replace(/^http/, 'ws')),
+    txHistoryStorage: new NoOpTransactionHistoryStorage(),
     costParameters: { additionalFeeOverhead: 300_000_000_000_000n, feeBlocksMargin: 5 },
   };
 
@@ -100,7 +115,10 @@ async function createWallet(seed: string) {
 }
 
 async function createProviders(walletCtx: ReturnType<typeof createWallet> extends Promise<infer T> ? T : never) {
-  const privateStatePassword = process.env.PRIVATE_STATE_PASSWORD?.trim() || 'development';
+  // The SDK requires the private-state password to be at least 16 characters.
+  // The default below is a placeholder for local devnet only — set a strong
+  // password via PRIVATE_STATE_PASSWORD when you move to a non-local target.
+  const privateStatePassword = process.env.PRIVATE_STATE_PASSWORD?.trim() || 'Local-Devnet-Development-Placeholder-1';
 
   const state = await walletCtx.wallet.waitForSyncedState();
 
@@ -130,9 +148,9 @@ async function createProviders(walletCtx: ReturnType<typeof createWallet> extend
       accountId,
       privateStoragePasswordProvider: () => privateStatePassword,
     }),
-    publicDataProvider: indexerPublicDataProvider(CONFIG.indexer, CONFIG.indexerWS),
+    publicDataProvider: indexerPublicDataProvider(localDevnet.indexer, localDevnet.indexerWS),
     zkConfigProvider,
-    proofProvider: httpClientProofProvider(CONFIG.proofServer, zkConfigProvider),
+    proofProvider: httpClientProofProvider(localDevnet.proofServer, zkConfigProvider),
     walletProvider,
     midnightProvider: walletProvider,
   };
@@ -155,15 +173,10 @@ async function main() {
 
   const deployment = JSON.parse(fs.readFileSync('deployment.json', 'utf-8'));
   console.log(`  Contract: ${deployment.contractAddress}`);
-  console.log(`  Network: ${deployment.network || 'preprod'}\n`);
+  console.log(`  Network: ${deployment.network || localDevnet.networkId}\n`);
 
   try {
-    // Create wallet from saved seed
-    if (!fs.existsSync('.midnight-seed')) {
-      console.error('❌ No .midnight-seed file found! Run: npm run deploy\n');
-      process.exit(1);
-    }
-    const seed = fs.readFileSync('.midnight-seed', 'utf-8').trim();
+    const seed = GENESIS_SEED;
 
     console.log('  Connecting to wallet...');
     const walletCtx = await createWallet(seed);

@@ -1,0 +1,178 @@
+/**
+ * End-to-end smoke check for {{projectName}}.
+ *
+ * Reads deployment.json, reconnects to the deployed contract, reads its
+ * ledger state, and exits 0 on success. Used by `npm run test:e2e` and by
+ * the project's CI workflows.
+ */
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { WebSocket } from 'ws';
+import { Buffer } from 'buffer';
+
+import { findDeployedContract } from '@midnight-ntwrk/midnight-js-contracts';
+import { httpClientProofProvider } from '@midnight-ntwrk/midnight-js-http-client-proof-provider';
+import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
+import { levelPrivateStateProvider } from '@midnight-ntwrk/midnight-js-level-private-state-provider';
+import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config-provider';
+import { setNetworkId, getNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
+import * as ledger from '@midnight-ntwrk/ledger-v8';
+import { WalletFacade } from '@midnight-ntwrk/wallet-sdk-facade';
+import { DustWallet } from '@midnight-ntwrk/wallet-sdk-dust-wallet';
+import { HDWallet, Roles } from '@midnight-ntwrk/wallet-sdk-hd';
+import { ShieldedWallet } from '@midnight-ntwrk/wallet-sdk-shielded';
+import { createKeystore, PublicKey, UnshieldedWallet } from '@midnight-ntwrk/wallet-sdk-unshielded-wallet';
+import { NoOpTransactionHistoryStorage } from '@midnight-ntwrk/wallet-sdk-abstractions';
+import { CompiledContract } from '@midnight-ntwrk/compact-js';
+
+// @ts-expect-error wallet sync requires WebSocket
+globalThis.WebSocket = WebSocket;
+
+// ─── Network configuration ─────────────────────────────────────────────────────
+//
+// Single source of truth for everything the wallet and providers need to point at.
+// To add another deploy target later (e.g. Preprod), define a sibling object with
+// the same shape and select between them. Don't add the selector until it's needed.
+
+const localDevnet = {
+  networkId: 'undeployed' as const,
+  indexer: 'http://127.0.0.1:8088/api/v3/graphql',
+  indexerWS: 'ws://127.0.0.1:8088/api/v3/graphql/ws',
+  node: 'ws://127.0.0.1:9944',
+  proofServer: 'http://127.0.0.1:6300',
+};
+
+setNetworkId(localDevnet.networkId);
+
+// ─── Genesis seed ──────────────────────────────────────────────────────────────
+//
+// LOCAL DEVNET ONLY.
+// The local devnet's `dev` preset pre-mints NIGHT to the wallet derived from
+// this well-known seed. Anyone running this devnet has full access to the funds
+// at this seed — never reuse it on Preprod, mainnet, or any environment that
+// handles real value.
+const GENESIS_SEED = '0000000000000000000000000000000000000000000000000000000000000001';
+
+function fail(msg: string): never {
+  console.error(`❌ e2e-check failed: ${msg}`);
+  process.exit(1);
+}
+
+function isHexAddress(s: unknown): s is string {
+  return typeof s === 'string' && /^[0-9a-fA-F]+$/.test(s) && s.length >= 32;
+}
+
+async function main() {
+  // 1. deployment.json sanity
+  if (!fs.existsSync('deployment.json')) fail('deployment.json missing — run `npm run setup` first.');
+  const deployment = JSON.parse(fs.readFileSync('deployment.json', 'utf-8'));
+  if (!isHexAddress(deployment.contractAddress)) {
+    fail(`deployment.json missing or invalid contractAddress: ${JSON.stringify(deployment, null, 2)}`);
+  }
+  if (deployment.network !== localDevnet.networkId) {
+    fail(`deployment.json network mismatch: expected '${localDevnet.networkId}', got '${deployment.network}'.`);
+  }
+
+  // 2. Build wallet (genesis seed) and providers
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const zkConfigPath = path.resolve(__dirname, '..', 'contracts', 'managed', 'hello-world');
+  const contractPath = path.join(zkConfigPath, 'contract', 'index.js');
+  if (!fs.existsSync(contractPath)) fail('Compiled contract missing — run `npm run compile`.');
+  const HelloWorld = await import(pathToFileURL(contractPath).href);
+  const compiledContract = CompiledContract.make('hello-world', HelloWorld.Contract).pipe(
+    CompiledContract.withVacantWitnesses,
+    CompiledContract.withCompiledFileAssets(zkConfigPath),
+  );
+
+  const hd = HDWallet.fromSeed(Buffer.from(GENESIS_SEED, 'hex'));
+  if (hd.type !== 'seedOk') fail('Bad seed.');
+  const derived = hd.hdWallet
+    .selectAccount(0)
+    .selectRoles([Roles.Zswap, Roles.NightExternal, Roles.Dust])
+    .deriveKeysAt(0);
+  if (derived.type !== 'keysDerived') fail('Key derivation failed.');
+  hd.hdWallet.clear();
+
+  const networkId = getNetworkId();
+  const shieldedSecretKeys = ledger.ZswapSecretKeys.fromSeed(derived.keys[Roles.Zswap]);
+  const dustSecretKey = ledger.DustSecretKey.fromSeed(derived.keys[Roles.Dust]);
+  const unshieldedKeystore = createKeystore(derived.keys[Roles.NightExternal], networkId);
+
+  const wallet = await WalletFacade.init({
+    configuration: {
+      networkId,
+      indexerClientConnection: { indexerHttpUrl: localDevnet.indexer, indexerWsUrl: localDevnet.indexerWS },
+      provingServerUrl: new URL(localDevnet.proofServer),
+      relayURL: new URL(localDevnet.node),
+      txHistoryStorage: new NoOpTransactionHistoryStorage(),
+      costParameters: { additionalFeeOverhead: 300_000_000_000_000n, feeBlocksMargin: 5 },
+    },
+    shielded: async (c) => ShieldedWallet(c).startWithSecretKeys(shieldedSecretKeys),
+    unshielded: async (c) =>
+      UnshieldedWallet(c).startWithPublicKey(PublicKey.fromKeyStore(unshieldedKeystore)),
+    dust: async (c) =>
+      DustWallet(c).startWithSecretKey(dustSecretKey, ledger.LedgerParameters.initialParameters().dust),
+  });
+  await wallet.start(shieldedSecretKeys, dustSecretKey);
+  const state = await wallet.waitForSyncedState();
+
+  const zkConfigProvider = new NodeZkConfigProvider(zkConfigPath);
+  const walletProvider = {
+    getCoinPublicKey: () => state.shielded.coinPublicKey.toHexString(),
+    getEncryptionPublicKey: () => state.shielded.encryptionPublicKey.toHexString(),
+    async balanceTx() {
+      throw new Error('e2e-check is read-only and should not balance transactions');
+    },
+    submitTx() {
+      throw new Error('e2e-check is read-only and should not submit transactions');
+    },
+  } as any;
+
+  const providers = {
+    privateStateProvider: levelPrivateStateProvider({
+      privateStateStoreName: 'hello-world-state',
+      accountId: unshieldedKeystore.getBech32Address().toString(),
+      // SDK requires ≥16 chars. e2e-check is read-only so we don't expose
+      // the env-var override here — match the deploy script's local-devnet default.
+      privateStoragePasswordProvider: () => 'Local-Devnet-Development-Placeholder-1',
+    }),
+    publicDataProvider: indexerPublicDataProvider(localDevnet.indexer, localDevnet.indexerWS),
+    zkConfigProvider,
+    proofProvider: httpClientProofProvider(localDevnet.proofServer, zkConfigProvider),
+    walletProvider,
+    midnightProvider: walletProvider,
+  };
+
+  // 3. Reconnect to the deployed contract — proves callTx interface is wired
+  try {
+    await findDeployedContract(providers, {
+      contractAddress: deployment.contractAddress,
+      compiledContract: compiledContract as any,
+    });
+  } catch (err: any) {
+    await wallet.stop();
+    fail(`findDeployedContract threw: ${err?.message ?? err}`);
+  }
+
+  // 4. Read the on-chain contract state via the public data provider — proves
+  // the contract is indexed and queryable on the chain itself, not just that
+  // we know how to construct the local handle.
+  const onChainState = await providers.publicDataProvider.queryContractState(deployment.contractAddress);
+  if (!onChainState) {
+    await wallet.stop();
+    fail(`queryContractState returned null for ${deployment.contractAddress}`);
+  }
+
+  console.log(`✅ e2e-check passed`);
+  console.log(`   contractAddress: ${deployment.contractAddress}`);
+  console.log(`   network:         ${deployment.network}`);
+
+  await wallet.stop();
+  process.exit(0);
+}
+
+main().catch(async (err) => {
+  console.error(err);
+  process.exit(1);
+});
