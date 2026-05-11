@@ -56,21 +56,23 @@ This DApp supports three networks:
 | `preview` | Public preview testnet. Faucet at `https://faucet.preview.midnight.network`. |  |
 | `preprod` | Public preprod testnet. Faucet at `https://faucet.preprod.midnight.network`. |  |
 
-Switch networks with the `--network` flag on `setup`, `deploy`, `cli`, or `check-balance`:
+The active network is **sticky**: whichever network you last interacted
+with stays active until you switch. Any command run with `--network <name>`
+also sets that network active for subsequent commands. The default on a
+fresh project is `undeployed` (local devnet).
 
 ```sh
-npm run setup -- --network preview
-npm run cli -- --network preview
-npm run check-balance -- --network preview
+npm run setup -- --network preview   # runs on preview AND makes it active
+npm run cli                          # still uses preview
+npm run check-balance                # still uses preview
 ```
 
-Or set the active network explicitly (no other action), so subsequent commands don't need the flag:
+You can also switch without running anything else:
 
 ```sh
 npm run network preview         # active network is now preview
-npm run setup                   # uses preview
-npm run cli                     # uses preview
-npm run network                 # prints current state
+npm run network                 # prints current active network
+npm run network undeployed      # switch back to local devnet
 ```
 
 ### How wallets work across networks

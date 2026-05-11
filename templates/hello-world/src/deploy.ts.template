@@ -293,10 +293,6 @@ async function main() {
   const proofServerReady = await waitForProofServer();
   if (!proofServerReady) {
     console.log('\n  ❌ Proof server not responding. Run: docker compose up -d\n');
-    fs.writeFileSync(
-      'deployment.json',
-      JSON.stringify({ address, network: networkConfig.networkId, status: 'proof_server_unavailable' }, null, 2),
-    );
     await walletCtx.wallet.stop();
     process.exit(1);
   }
@@ -361,10 +357,6 @@ async function main() {
           fullError.includes('connect ECONNREFUSED 127.0.0.1:6300'))
       ) {
         console.log('  ❌ Proof server unreachable. Run: docker compose up -d\n');
-        fs.writeFileSync(
-          'deployment.json',
-          JSON.stringify({ address, network: networkConfig.networkId, status: 'proof_server_error' }, null, 2),
-        );
         await walletCtx.wallet.stop();
         process.exit(1);
       }
@@ -381,14 +373,6 @@ async function main() {
           await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
         } else {
           console.log(`  ❌ Not enough DUST after ${MAX_RETRIES} retries (current: ${dustBalance.toLocaleString()})`);
-          fs.writeFileSync(
-            'deployment.json',
-            JSON.stringify(
-              { address, network: networkConfig.networkId, status: 'pending_dust', lastAttempt: new Date().toISOString() },
-              null,
-              2,
-            ),
-          );
           await walletCtx.wallet.stop();
           process.exit(1);
         }
